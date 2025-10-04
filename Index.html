@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Tamu Express - Hotels</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100 text-gray-900 transition" id="body">
+<header class="bg-green-600 text-white p-4 flex justify-between items-center">
+  <h1 class="font-bold text-lg">Tamu Express</h1>
+  <nav class="flex items-center gap-3">
+    <button class="tab px-3" data-tab="restaurants">Restaurants</button>
+    <button class="tab px-3" data-tab="orders">Orders</button>
+    <button class="tab px-3" data-tab="hotel">Hotel Portal</button>
+    <button id="themeToggle" class="px-3 py-1 bg-gray-200 rounded">🌙</button>
+  </nav>
+</header>
+
+<main id="app" class="p-4"></main>
+
+<script type="module">
+/* ============================
+   Firebase + Firestore imports
+   ============================ */
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.3.0/firebase-app.js";
+import {
+  getFirestore, collection, addDoc, setDoc, doc, onSnapshot,
+  query, where, getDocs, deleteDoc
+} from "https://www.gstatic.com/firebasejs/12.3.0/firebase-firestore.js";
+
+/* ======= Your Firebase config =======
+   Replace with your project's config if different.
+   Current uses: tamuexpress-26e4a
+======================================*/
+const firebaseConfig = {
+  apiKey: "AIzaSyApi2RjwEXEW2mTwCMiYERKUNAYL8Toddk",
+  authDomain: "tamuexpress-26e4a.firebaseapp.com",
+  projectId: "tamuexpress-26e4a",
+  storageBucket: "tamuexpress-26e4a.appspot.com",
+  messagingSenderId: "202068792631",
+  appId: "1:202068792631:web:8a9b97028ebd7a45af76b2"
+};
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+
+/* ======= App state ======= */
+let hotels = [];        // all hotels (firestore)
+let restaurants = [];   // all restaurant docs (each has hotelId & menu[])
+let orders = [];        // all orders
+let cart = [];
+let currentTab = "restaurants"; // restaurants / orders / hotel
+let currentHotelId = null;      // set to doc id when hotel logs in
+
+/* ======= Helpers ======= */
+function getHotelById(id) {
+  return hotels.find(h => h.id === id) || { name: "Unknown", till: "-" };
+}
+function escapeHTML(s){ return (s||"").toString().replace(/[&<>'"]/g,t=>({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;","\"":"&quot;"}[t])); }
+
+/* ======= Render UI ======= */
+function render(){
+  const app = document.getElementById("app");
+
+  // RESTAURANTS (customers)
+  if(currentTab === "restaurants"){
+    app.innerHTML = `<h2 class="text-xl font-semibold mb-4">Restaurants</h2>
+      ${restaurants.map(r=>`
+        <div class="bg-white shadow rounded p-4 mb-3">
+          <h3 class="font-bold">${escapeHTML(r.name)} — <small class="text-gray-600">${escapeHTML(getHotelById(r.hotelId).name)}</small></h3>
+          <div class="mt-2">
+            ${ (r.menu?.length>0) ? r.menu.map(m=>`
+                <div class="flex justify-between items-center border-b py-1">
+                  <div><strong>${escapeHTML(m.name)}</strong> — ${escapeHTML(m.description||'')}</div>
+                  <div>
+                    <span class="mr-3">KSh ${m.price}</span>
+                    <button class="addToCartBtn bg-green-500 text-white px-2 py-1 rounded text-sm"
+                      data-name="${escapeHTML(m.name)}"
+                      data-price="${m.price}"
+                      data-hotel="${r.hotelId}">
+                      Add
+                    </button>
+                  </div>
+                </div>`).join("") : `<p class="text-gray-500">No menu items yet.</p>`}
+          </div>
+        </div>`
+      ).join("")}
+
+      <div class="bg-white shadow rounded p-4 mt-6">
+        <h3 class="font-bold mb-2">Cart</h3>
+        ${cart.length===0 ? `<p>Cart is empty</p>` : `
+          <ul>${cart.map((c,i)=>`<li>${escapeHTML(c.name)} — KSh ${c.price} <button class="removeFromCartBtn text-red-500" data-index="${i}">x</button></li>`).join("")}</ul>
+          <p class="mt-2 font-semibold">Subtotal: KSh ${cart.reduce((s,i)=>s+i.price,0)}</p>
+          <p>Service Fee: KSh 30</p>
+          <p class="font-bold">Total: KSh ${cart.reduce((s,i)=>s+i.price,0)+30}</p>
+          <p class="text-green-600">Pay to Till: <strong>${escapeHTML(getHotelById(cart[0]?.hotelId).till)}</strong></p>
+          <input id="custName" placeholder="Your name" class="border p-2 w-full mt-2"/>
+          <input id="custPhone" placeholder="Phone number" class="border p-2 w-full mt-2"/>
+          <div class="flex gap-2 mt-2">
+            <button id="placeOrder" class="bg-blue-500 text-white px-3 py-1 rounded">Place Order</button>
+            <button id="resetCart" class="bg-gray-500 text-white px-3 py-1 rounded">Reset Cart</button>
+          </div>
+        `}
+      </div>`;
+    return;
+  }
+
+  // ORDERS (real-time list)
+  if(currentTab === "orders"){
+    app.innerHTML = `<h2 class="text-xl font-semibold mb-4">Orders</h2>
+      ${orders.length===0 ? `<p>No orders yet</p>` :
+        orders.map(o=>`
+          <div class="bg-white shadow rounded p-3 mb-3">
+            <h3 class="font-semibold">Order #${o.id}</h3>
+            <p><strong>Customer:</strong> ${escapeHTML(o.customerName)} — ${escapeHTML(o.customerPhone)}</p>
+            <p><strong>Hotel:</strong> ${escapeHTML(getHotelById(o.hotelId).name)}</p>
+            <ul class="text-sm mt-2">${o.items.map(it=>`<li>${escapeHTML(it.name)} — KSh ${it.price}</li>`).join("")}</ul>
+            <p class="mt-2">Subtotal: KSh ${o.subtotal} — Service: KSh ${o.serviceFee} — <strong>Total: KSh ${o.total}</strong></p>
+            <p class="text-green-600">Till: ${escapeHTML(getHotelById(o.hotelId).till)}</p>
+          </div>
+        `).join("") }
+    `;
+    return;
+  }
+
+  // HOTEL PORTAL (login/register/manage own menu & reset)
+  if(currentTab === "hotel"){
+    if(currentHotelId){
+      const hotel = hotels.find(h=>h.id===currentHotelId);
+      const rest = restaurants.find(r=>r.hotelId===currentHotelId) || { menu: [] };
+      app.innerHTML = `
+        <h2 class="text-xl font-semibold mb-3">Hotel Portal — ${escapeHTML(hotel.name)}</h2>
+        <div class="flex gap-2 mb-3">
+          <button id="logoutHotel" class="bg-red-500 text-white px-3 py-1 rounded">Logout</button>
+          <button id="resetData" class="bg-yellow-600 text-white px-3 py-1 rounded">Reset Hotel Data</button>
+        </div>
+
+        <div class="bg-white shadow rounded p-4">
+          <h3 class="font-bold mb-2">Manage Your Menu</h3>
+          <form id="addMenuItem" class="flex gap-2 mb-3">
+            <input name="name" placeholder="Item name" class="border p-2 flex-1"/>
+            <input name="price" type="number" placeholder="Price" class="border p-2 w-28"/>
+            <input name="desc" placeholder="Description (optional)" class="border p-2 flex-1"/>
+            <button class="bg-green-500 text-white px-3 py-1 rounded">Add</button>
+          </form>
+
+          <h4 class="font-semibold mb-2">Your menu</h4>
+          <ul>${rest.menu.map((m, idx)=>`<li>${escapeHTML(m.name)} — KSh ${m.price} <button class="removeMenuBtn text-red-500" data-index="${idx}">x</button></li>`).join("")}</ul>
+        </div>
+
+        <div class="bg-white shadow rounded p-4 mt-4">
+          <h3 class="font-bold mb-2">View other hotels (read-only)</h3>
+          ${restaurants.filter(r=>r.hotelId !== currentHotelId).map(r=>`
+            <div class="border p-2 mb-2 rounded">
+              <h4 class="font-semibold">${escapeHTML(r.name)} — <small>${escapeHTML(getHotelById(r.hotelId).name)}</small></h4>
+              <ul>${(r.menu||[]).map(it=>`<li>${escapeHTML(it.name)} — KSh ${it.price}</li>`).join("")}</ul>
+            </div>`).join("")}
+        </div>
+      `;
+      return;
+    } else {
+      // login + register
+      app.innerHTML = `
+        <h2 class="text-xl font-semibold mb-3">Hotel Login / Register</h2>
+
+        <div class="grid md:grid-cols-2 gap-4">
+          <form id="hotelLogin" class="bg-white p-4 shadow rounded">
+            <h3 class="font-semibold mb-2">Login</h3>
+            <input name="name" placeholder="Hotel name" class="border p-2 w-full mb-2"/>
+            <input name="pass" type="password" placeholder="Password" class="border p-2 w-full mb-2"/>
+            <button class="bg-green-600 text-white px-3 py-1 rounded">Login</button>
+          </form>
+
+          <form id="hotelRegister" class="bg-white p-4 shadow rounded">
+            <h3 class="font-semibold mb-2">Register</h3>
+            <input name="name" placeholder="Hotel name" class="border p-2 w-full mb-2"/>
+            <input name="pass" type="password" placeholder="Password" class="border p-2 w-full mb-2"/>
+            <input name="till" placeholder="Till number" class="border p-2 w-full mb-2"/>
+            <button class="bg-blue-600 text-white px-3 py-1 rounded">Register</button>
+          </form>
+        </div>
+      `;
+      return;
+    }
+  }
+}
+
+/* ======================
+   Real-time listeners
+   ====================== */
+onSnapshot(collection(db,"hotels"), snap=>{
+  hotels = snap.docs.map(d=>({ id: d.id, ...d.data() }));
+  render();
+});
+onSnapshot(collection(db,"restaurants"), snap=>{
+  restaurants = snap.docs.map(d=>({ id: d.id, ...d.data() }));
+  render();
+});
+onSnapshot(collection(db,"orders"), snap=>{
+  orders = snap.docs.map(d=>({ id: d.id, ...d.data() })).sort((a,b)=>b.id-a.id);
+  render();
+});
+
+/* ======================
+   Event handling
+   ====================== */
+document.addEventListener("click", async (e) => {
+  // tab switch
+  if(e.target.classList.contains("tab")){
+    currentTab = e.target.dataset.tab;
+    render();
+    return;
+  }
+
+  // add to cart
+  if(e.target.classList.contains("addToCartBtn")){
+    const name = e.target.dataset.name;
+    const price = parseFloat(e.target.dataset.price);
+    const hotelId = e.target.dataset.hotel;
+    cart.push({ name, price, hotelId });
+    render();
+    return;
+  }
+
+  // remove from cart
+  if(e.target.classList.contains("removeFromCartBtn")){
+    cart.splice(parseInt(e.target.dataset.index),1); render(); return;
+  }
+
+  // reset cart
+  if(e.target.id === "resetCart"){ cart = []; render(); return; }
+
+  // place order (write to Firestore)
+  if(e.target.id === "placeOrder"){
+    const custName = document.getElementById("custName")?.value?.trim();
+    const custPhone = document.getElementById("custPhone")?.value?.trim();
+    if(!custName || !custPhone){ alert("Enter name and phone"); return; }
+    if(cart.length === 0){ alert("Cart is empty"); return; }
+    const subtotal = cart.reduce((s,i)=>s + i.price, 0);
+    try{
+      await addDoc(collection(db,"orders"), {
+        id: Date.now(),
+        customerName: custName,
+        customerPhone: custPhone,
+        items: cart,
+        hotelId: cart[0].hotelId,
+        subtotal,
+        serviceFee: 30,
+        total: subtotal + 30
+      });
+      alert("Order placed ✓");
+      cart = [];
+      render();
+    } catch(err){
+      console.error("Order error:", err);
+      alert("Failed to place order: " + err.message);
+    }
+    return;
+  }
+
+  // hotel logout
+  if(e.target.id === "logoutHotel"){ currentHotelId = null; render(); return; }
+
+  // reset data (for current hotel)
+  if(e.target.id === "resetData"){
+    if(!currentHotelId){ alert("No hotel logged in"); return; }
+    if(!confirm("This will delete your menu items and all orders for this hotel. Continue?")) return;
+    // clear menu in restaurants doc
+    const rest = restaurants.find(r => r.hotelId === currentHotelId);
+    if(rest){
+      await setDoc(doc(db,"restaurants",rest.id), { ...rest, menu: [] });
+    }
+    // delete orders for hotel
+    const q = query(collection(db,"orders"), where("hotelId","==", currentHotelId));
+    const snap = await getDocs(q);
+    for(const d of snap.docs) await deleteDoc(d.ref);
+    alert("Hotel data reset ✓");
+    return;
+  }
+
+  // remove menu item (only for logged-in hotel's own menu)
+  if(e.target.classList.contains("removeMenuBtn")){
+    const idx = parseInt(e.target.dataset.index);
+    const rest = restaurants.find(r=>r.hotelId === currentHotelId);
+    if(!rest) return;
+    rest.menu.splice(idx,1);
+    await setDoc(doc(db,"restaurants",rest.id), rest);
+    render();
+    return;
+  }
+});
+
+/* ======================
+   Forms handling
+   ====================== */
+document.addEventListener("submit", async (e) => {
+  e.preventDefault();
+
+  // HOTEL REGISTER
+  if(e.target.id === "hotelRegister"){
+    const name = e.target.name.value.trim();
+    const pass = e.target.pass.value;
+    const till = e.target.till.value.trim();
+    if(!name || !pass || !till) { alert("Fill all fields"); return; }
+    try{
+      const newH = await addDoc(collection(db,"hotels"), { name, pass, till });
+      // create restaurants doc
+      await addDoc(collection(db,"restaurants"), { hotelId: newH.id, name: `${name} Menu`, menu: [] });
+      // auto-login the new hotel immediately
+      currentHotelId = newH.id;
+      alert("Registered and logged in ✓");
+      render();
+    }catch(err){
+      console.error(err);
+      alert("Failed to register: " + err.message);
+    }
+    return;
+  }
+
+  // HOTEL LOGIN
+  if(e.target.id === "hotelLogin"){
+    const name = e.target.name.value.trim();
+    const pass = e.target.pass.value;
+    // find in local hotels array (populated by onSnapshot)
+    const found = hotels.find(h=>h.name === name && h.pass === pass);
+    if(found){
+      currentHotelId = found.id;
+      alert("Welcome back ✓");
+      render();
+    } else {
+      alert("Invalid login — check name/password (may take a second after register).");
+    }
+    return;
+  }
+
+  // ADD MENU ITEM (only for logged-in hotel)
+  if(e.target.id === "addMenuItem"){
+    if(!currentHotelId) { alert("Not logged in"); return; }
+    const name = e.target.name.value.trim();
+    const price = parseFloat(e.target.price.value);
+    const desc = e.target.desc.value?.trim() || "";
+    if(!name || isNaN(price)){ alert("Enter item name and valid price"); return; }
+    const rest = restaurants.find(r=>r.hotelId === currentHotelId);
+    if(!rest){ alert("No restaurant document found for this hotel"); return; }
+    rest.menu.push({ name, price, description: desc });
+    try{
+      await setDoc(doc(db,"restaurants",rest.id), rest);
+      e.target.reset();
+      alert("Menu item added ✓");
+    }catch(err){
+      console.error(err);
+      alert("Failed to add menu item: " + err.message);
+    }
+    return;
+  }
+});
+
+/* ======================
+   Theme toggle (Light default)
+   ====================== */
+const body = document.getElementById("body");
+const themeToggle = document.getElementById("themeToggle");
+// start light by default
+document.addEventListener("DOMContentLoaded", ()=> {
+  body.classList.remove("dark");
+  themeToggle.textContent = "🌙";
+});
+// toggle
+themeToggle.addEventListener("click", ()=> {
+  body.classList.toggle("dark");
+  themeToggle.textContent = body.classList.contains("dark") ? "☀️" : "🌙";
+});
+
+/* initial render */
+render();
+
+</script>
+</body>
+</html>
